@@ -1,26 +1,17 @@
+import os
+
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_ollama import ChatOllama
 
 
-SYSTEM_PROMPT = """
-Você é um assistente virtual hospedado no site da AMOBEM, uma associação de moradores do bairro Estrada Nova.
-Seu papel é responder às solicitações dos usuários de forma clara, educada e objetiva, sempre utilizando apenas informações confiáveis.
+def load_system_prompt(path: str = "system_prompt.txt") -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip()
 
-Regras importantes:
-- Nunca invente informações.
-- Caso não saiba a resposta, informe de forma transparente que não possui essa informação.
-- Responda sempre em português.
-- Seja cordial e prestativo.
 
-Informações sobre a AMOBEM:
-- A AMOBEM foi fundada em 1996 pelos moradores da Estrada Nova.
-- Telefone: +55 (47) 3370-8284
-- Email: amobem@contabilidadedalagnese.com
-- Endereço: Rua José Picolli, numero 532, Box 2, Jaraguá do Sul, SC, Brasil
-- CEP: 89254-350
-""".strip()
+SYSTEM_PROMPT = load_system_prompt()
 
 
 store = {}
@@ -42,8 +33,8 @@ def build_chain() -> RunnableWithMessageHistory:
     )
 
     llm = ChatOllama(
-        model="gemma3:4b",
-        base_url="http://localhost:11434",
+        model=os.getenv("OLLAMA_MODEL", "gemma3:4b"),
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         temperature=0.2,
     )
 
@@ -83,8 +74,11 @@ def main() -> None:
                 config={"configurable": {"session_id": session_id}},
             )
             print(f"AMOBEM: {resposta.content}\n")
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            print(f"Erro de conexão com o modelo: {exc}\n")
         except Exception as exc:
-            print(f"Erro ao consultar o modelo: {exc}\n")
+            print(f"Erro inesperado: {exc}\n")
+            raise
 
 
 if __name__ == "__main__":
