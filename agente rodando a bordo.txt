@@ -1,0 +1,19 @@
+agente rodando a bordo com RAG
+
+websocket para interagir com o front 
+
+captar essas metricas e fazer coisas brabas no prometeus 
+
+exemplo de alimentação do rag 
+{
+  "nome": "Amobem",
+  "bairro": "Estrada Nova",
+  "cidade": "Jaraguá do Sul",
+  "servicos": [
+    "Apoio social",
+    "Eventos comunitários",
+    "Educação"
+  ],
+  "contato": "(47) XXXX-XXXX"
+}
+
