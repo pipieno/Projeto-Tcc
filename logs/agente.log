@@ -9,3 +9,5 @@
 {"asctime": "2026-06-02 13:24:39,098", "levelname": "INFO", "name": "agente", "message": "Intera\u00e7\u00e3o conclu\u00edda", "session_id": "web-2p1cj5j", "input_length": 44, "response_length": 1702, "duration_seconds": 32.384}
 {"asctime": "2026-06-02 13:34:46,770", "levelname": "INFO", "name": "agente", "message": "Intera\u00e7\u00e3o conclu\u00edda", "session_id": "web-bxpyovk", "input_length": 54, "response_length": 550, "duration_seconds": 31.064}
 {"asctime": "2026-06-02 13:38:54,270", "levelname": "INFO", "name": "agente", "message": "Intera\u00e7\u00e3o conclu\u00edda", "session_id": "web-bxpyovk", "input_length": 19, "response_length": 756, "duration_seconds": 19.594}
+{"asctime": "2026-06-02 14:04:20,008", "levelname": "INFO", "name": "agente", "message": "Intera\u00e7\u00e3o conclu\u00edda", "session_id": "web-p6zeb7n", "input_length": 5, "response_length": 79, "duration_seconds": 23.835}
+{"asctime": "2026-06-02 14:13:40,675", "levelname": "INFO", "name": "agente", "message": "Intera\u00e7\u00e3o conclu\u00edda", "session_id": "web-p6zeb7n", "input_length": 4, "response_length": 46, "duration_seconds": 8.868}

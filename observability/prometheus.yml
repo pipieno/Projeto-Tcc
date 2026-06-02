@@ -13,5 +13,5 @@ scrape_configs:
 
   - job_name: agente-conversacional
     static_configs:
-      - targets: ['host.docker.internal:8000']
+      - targets: ['agente:8080']
     metrics_path: /metrics

@@ -39,18 +39,19 @@ def setup_logging() -> logging.Logger:
     logger.addHandler(stream_handler)
     return logger
 
-
 # ── Métricas ──────────────────────────────────────────────────────────────────
+
+MODEL_NAME = os.getenv("OLLAMA_MODEL", "gemma3:4b")
 
 REQUEST_COUNT = Counter(
     "agente_requests_total",
     "Total de interações com o agente",
-    ["session_id", "status"],
+    ["model", "status"],
 )
 RESPONSE_DURATION = Histogram(
     "agente_response_duration_seconds",
     "Tempo de resposta do modelo em segundos",
-    ["session_id"],
+    ["model"],
     buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0],
 )
 ACTIVE_SESSIONS = Gauge(
@@ -152,7 +153,7 @@ def chat_endpoint(req: ChatRequest):
     with tracer.start_as_current_span("interacao") as span:
         span.set_attribute("session_id", req.session_id)
         span.set_attribute("input_length", len(req.message))
-        span.set_attribute("model", os.getenv("OLLAMA_MODEL", "gemma3:4b"))
+        span.set_attribute("model", MODEL_NAME)
 
         record_message(req.session_id, "user", req.message)
         inicio = time.perf_counter()
@@ -166,8 +167,8 @@ def chat_endpoint(req: ChatRequest):
             span.set_attribute("response_length", len(resposta.content))
             span.set_attribute("duration_seconds", round(duracao, 3))
 
-            REQUEST_COUNT.labels(session_id=req.session_id, status="ok").inc()
-            RESPONSE_DURATION.labels(session_id=req.session_id).observe(duracao)
+            REQUEST_COUNT.labels(model=MODEL_NAME, status="ok").inc()
+            RESPONSE_DURATION.labels(model=MODEL_NAME).observe(duracao)
             record_message(req.session_id, "assistant", resposta.content)
 
             logger.info(
@@ -182,7 +183,7 @@ def chat_endpoint(req: ChatRequest):
             return {"response": resposta.content}
 
         except (ConnectionError, TimeoutError, OSError) as exc:
-            REQUEST_COUNT.labels(session_id=req.session_id, status="error").inc()
+            REQUEST_COUNT.labels(model=MODEL_NAME, status="error").inc()
             span.record_exception(exc)
             logger.error(
                 "Erro de conexão com o modelo",
@@ -191,7 +192,7 @@ def chat_endpoint(req: ChatRequest):
             return {"response": "Erro de conexão com o modelo. Tente novamente."}
 
         except Exception as exc:
-            REQUEST_COUNT.labels(session_id=req.session_id, status="error").inc()
+            REQUEST_COUNT.labels(model=MODEL_NAME, status="error").inc()
             span.record_exception(exc)
             logger.error(
                 "Erro inesperado",
