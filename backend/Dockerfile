@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py system_prompt.txt ./
+COPY app.py database.py system_prompt.txt ./
 
 RUN mkdir -p logs
 

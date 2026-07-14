@@ -6,11 +6,12 @@ Trabalho de Conclusão de Curso — Implementação de um agente conversacional 
 
 ## Visão Geral
 
-O projeto consiste em um assistente virtual da **AMOBEM** (Associação de Moradores do Bairro Estrada Nova), restrito a responder apenas perguntas sobre a associação e o bairro. Toda a infraestrutura é instrumentada com as três pilares de observabilidade:
+O projeto consiste em um assistente virtual da **AMOBEN** (Associação de Moradores do Bairro Estrada Nova), restrito a responder apenas perguntas sobre a associação e o bairro. Toda a infraestrutura é instrumentada com as três pilares de observabilidade:
 
 - **Logs estruturados** — JSON via `python-json-logger` → Promtail → Loki
 - **Métricas** — `prometheus-client` exposto no FastAPI → Prometheus → Grafana
 - **Rastreamento distribuído** — OpenTelemetry SDK → Jaeger via OTLP/gRPC
+- **Persistência de conversas** — sessões autenticadas e mensagens armazenadas em MySQL
 
 ---
 
@@ -44,6 +45,9 @@ O projeto consiste em um assistente virtual da **AMOBEM** (Associação de Morad
     │  (3100)     │  │       (3000)           │
     └─────────────┘  └───────────────────────┘
 ```
+
+O MySQL é acessível apenas pelos containers na rede interna do Docker Compose. Ele
+não publica a porta `3306` no host.
 
 ---
 
@@ -80,9 +84,16 @@ sudo systemctl restart ollama
 git clone <url-do-repo>
 cd Projeto-Tcc
 
+# criar a configuração local e trocar as senhas de exemplo
+cp .env.example .env
+
 # subir toda a stack
 docker compose up -d --build
 ```
+
+Antes de subir a stack, edite o `.env` e substitua `DB_PASSWORD` e
+`MYSQL_ROOT_PASSWORD` por senhas fortes e diferentes. O arquivo `.env` é local e
+não deve ser versionado.
 
 Na primeira vez o Docker vai baixar as imagens e compilar o frontend React — pode demorar alguns minutos.
 
@@ -94,6 +105,7 @@ Na primeira vez o Docker vai baixar as imagens e compilar o frontend React — p
 |---|---|---|
 | Frontend | http://localhost:3001 | Chat com o agente |
 | Backend API | http://localhost:8080 | FastAPI (métricas em `/metrics`) |
+| MySQL | Sem porta publicada | Sessões e histórico de conversas |
 | Grafana | http://localhost:3000 | Dashboards (admin / admin) |
 | Prometheus | http://localhost:9091 | Métricas brutas |
 | Jaeger | http://localhost:16686 | Rastreamento distribuído |
@@ -103,7 +115,7 @@ Na primeira vez o Docker vai baixar as imagens e compilar o frontend React — p
 
 ## Dashboard de Observabilidade
 
-O dashboard **AMOBEM — Agente Conversacional** é provisionado automaticamente no Grafana ao iniciar a stack.
+O dashboard **AMOBEN — Agente Conversacional** é provisionado automaticamente no Grafana ao iniciar a stack.
 
 ![Dashboard Grafana](image.png)
 
@@ -125,7 +137,8 @@ O dashboard **AMOBEM — Agente Conversacional** é provisionado automaticamente
 Projeto-Tcc/
 ├── backend/
 │   ├── app.py              # FastAPI + LangChain + observabilidade
-│   ├── system_prompt.txt   # Prompt do agente AMOBEM
+│   ├── database.py         # Persistência e autenticação das sessões no MySQL
+│   ├── system_prompt.txt   # Prompt do agente AMOBEN
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── frontend/
@@ -147,6 +160,7 @@ Projeto-Tcc/
 │       └── dashboards/
 │           └── amobem.json     # Dashboard provisionado
 ├── logs/                       # Logs gerados pelo agente (volume)
+├── .env.example                # Modelo das variáveis locais
 └── docker-compose.yml
 ```
 
@@ -159,12 +173,68 @@ Projeto-Tcc/
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Endpoint do Ollama |
 | `OLLAMA_MODEL` | `gemma3:4b` | Modelo de linguagem utilizado |
 | `JAEGER_ENDPOINT` | `http://jaeger:4317` | Endpoint OTLP do Jaeger |
+| `DB_HOST` | `mysql` | Nome do serviço MySQL na rede interna |
+| `DB_PORT` | `3306` | Porta interna do MySQL |
+| `DB_NAME` | `amoben` | Banco usado pela aplicação |
+| `DB_USER` | `amoben_app` | Usuário da aplicação, sem uso da conta root |
+| `DB_PASSWORD` | sem valor seguro padrão | Senha do usuário da aplicação |
+| `MYSQL_ROOT_PASSWORD` | sem valor seguro padrão | Senha administrativa usada na inicialização do MySQL |
+| `SESSION_TTL_HOURS` | `24` | Validade do token de uma sessão, em horas |
+
+## Proteção e persistência das conversas
+
+O navegador não cria mais o identificador da sessão sozinho. Primeiro, ele pede
+ao backend uma sessão nova:
+
+```bash
+curl -X POST http://localhost:8080/sessions
+```
+
+A resposta contém um identificador, um token secreto e o horário de expiração:
+
+```json
+{
+  "session_id": "...",
+  "session_token": "...",
+  "expires_at": "..."
+}
+```
+
+O token precisa ser enviado como Bearer tanto no chat quanto na exportação:
+
+```bash
+curl -X POST http://localhost:8080/chat \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer SEU_SESSION_TOKEN' \
+  -d '{"session_id":"SEU_SESSION_ID","message":"Olá"}'
+
+curl http://localhost:8080/export/SEU_SESSION_ID \
+  -H 'Authorization: Bearer SEU_SESSION_TOKEN'
+```
+
+Conhecer apenas o `session_id` não autoriza ler, continuar ou exportar a
+conversa. Trate `session_token` como uma senha: não o coloque em URLs, logs ou
+mensagens compartilhadas. A validade é configurada por `SESSION_TTL_HOURS`.
+
+Sessões e mensagens ficam no volume nomeado `mysql_data`, portanto sobrevivem a
+reinicializações dos containers e a `docker compose down`. O volume só é apagado
+explicitamente, por exemplo com `docker compose down -v`.
+
+### Testes de segurança das sessões
+
+```bash
+python -m pip install -r backend/requirements-dev.txt
+python -m pytest backend/tests
+```
+
+A suíte verifica tokens ausentes ou incorretos, tentativa de usar o token de
+outra sessão, persistência somente do hash, exportação autorizada e expiração.
 
 ---
 
 ## Exportação de conversas
 
-O frontend permite exportar o histórico de qualquer sessão em dois formatos:
+O frontend permite exportar o histórico da sessão autenticada em dois formatos:
 
 - **JSON** — estrutura completa com timestamps e metadados
 - **CSV** — formato tabular com `role, timestamp, content`

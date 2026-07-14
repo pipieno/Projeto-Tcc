@@ -25,3 +25,20 @@ skill.md
 .gitignore
 SKILL.md
 
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+backend/agente.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Runtime
+logs/*.log
+
+.codex

@@ -21,8 +21,6 @@ scrape_configs:
       - json:
           expressions:
             level: level
-            session_id: session_id
             message: message
       - labels:
           level:
-          session_id:

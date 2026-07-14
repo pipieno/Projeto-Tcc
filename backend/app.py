@@ -1,45 +1,110 @@
-import os
-import time
+from __future__ import annotations
+
+import hashlib
 import logging
+import math
+import os
+import re
+import secrets
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Annotated, Any
 
-from datetime import datetime, timezone
-
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
-from pydantic import BaseModel
-from pythonjsonlogger import jsonlogger
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_ollama import ChatOllama
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
+from pydantic import BaseModel, Field, UUID4, field_validator
+from pythonjsonlogger import jsonlogger
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
 
-from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_ollama import ChatOllama
+try:  # Supports both `uvicorn app:app` and `import backend.app`.
+    from .database import ChatSession, Database, Message
+except ImportError:  # pragma: no cover - exercised by the Docker entrypoint
+    from database import ChatSession, Database, Message
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+
+UUID_PATTERN = re.compile(
+    r"(?<![0-9a-f])"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+    r"(?![0-9a-f])",
+    re.IGNORECASE,
+)
+
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def session_ref(session_id: str) -> str:
+    """Return a non-reversible, low-cardinality-safe reference for diagnostics."""
+
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12]
+
+
+class RedactSessionIdFilter(logging.Filter):
+    """Prevent UUID session IDs in Uvicorn access-log request paths."""
+
+    @staticmethod
+    def _redact(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        return UUID_PATTERN.sub(
+            lambda match: f"session_ref={session_ref(match.group(0))}",
+            value,
+        )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._redact(item) for item in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: self._redact(value) for key, value in record.args.items()
+            }
+        return True
+
 
 def setup_logging() -> logging.Logger:
     Path("logs").mkdir(exist_ok=True)
     logger = logging.getLogger("agente")
     logger.setLevel(logging.INFO)
-    formatter = jsonlogger.JsonFormatter(
-        fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
-    file_handler = logging.FileHandler("logs/agente.log")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    logger.propagate = False
+
+    if not getattr(logger, "_agente_configured", False):
+        formatter = jsonlogger.JsonFormatter(
+            fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
+        )
+        file_handler = logging.FileHandler("logs/agente.log")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+        logger._agente_configured = True  # type: ignore[attr-defined]
+
+    access_filter = RedactSessionIdFilter()
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.addFilter(access_filter)
+    for handler in uvicorn_access_logger.handlers:
+        handler.addFilter(access_filter)
     return logger
 
-# ── Métricas ──────────────────────────────────────────────────────────────────
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
 
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "gemma3:4b")
 
@@ -73,25 +138,19 @@ def setup_tracing() -> trace.Tracer:
     return trace.get_tracer("agente-conversacional")
 
 
-# ── Agente ────────────────────────────────────────────────────────────────────
+# ── Agent ─────────────────────────────────────────────────────────────────────
 
-def load_system_prompt(path: str = "system_prompt.txt") -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read().strip()
+def load_system_prompt(path: str | Path | None = None) -> str:
+    prompt_path = Path(path) if path else Path(__file__).resolve().with_name(
+        "system_prompt.txt"
+    )
+    return prompt_path.read_text(encoding="utf-8").strip()
 
 
 SYSTEM_PROMPT = load_system_prompt()
-store: dict[str, InMemoryChatMessageHistory] = {}
 
 
-def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = InMemoryChatMessageHistory()
-        ACTIVE_SESSIONS.set(len(store))
-    return store[session_id]
-
-
-def build_chain() -> RunnableWithMessageHistory:
+def build_chain():
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", SYSTEM_PROMPT),
@@ -100,115 +159,386 @@ def build_chain() -> RunnableWithMessageHistory:
         ]
     )
     llm = ChatOllama(
-        model=os.getenv("OLLAMA_MODEL", "gemma3:4b"),
+        model=MODEL_NAME,
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         temperature=0.2,
     )
-    chain = prompt | llm
-    return RunnableWithMessageHistory(
-        chain,
-        get_session_history,
-        input_messages_key="input",
-        history_messages_key="history",
+    return prompt | llm
+
+
+# ── API models and helpers ────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    session_id: UUID4
+    message: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("message")
+    @classmethod
+    def reject_blank_message(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A mensagem não pode estar vazia")
+        return value
+
+
+class SessionResponse(BaseModel):
+    session_id: UUID4
+    session_token: str
+    expires_at: datetime
+
+
+class ChatResponse(BaseModel):
+    response: str
+
+
+class ExportedMessage(BaseModel):
+    role: str
+    content: str
+    timestamp: datetime
+
+
+class ExportResponse(BaseModel):
+    session_id: UUID4
+    exported_at: datetime
+    total_messages: int
+    messages: list[ExportedMessage]
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def resolve_session_ttl(session_ttl_hours: float | None = None) -> timedelta:
+    raw_value: str | float = (
+        session_ttl_hours
+        if session_ttl_hours is not None
+        else os.getenv("SESSION_TTL_HOURS", "24")
     )
+    try:
+        hours = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SESSION_TTL_HOURS deve ser um número") from exc
+    if not math.isfinite(hours) or not 0 < hours <= 8_760:
+        raise RuntimeError("SESSION_TTL_HOURS deve estar entre 0 e 8760")
+    return timedelta(hours=hours)
+
+
+def unauthorized() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Sessão ou credencial inválida",
+        headers={
+            "WWW-Authenticate": "Bearer",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def get_bearer_token(
+    authorization: Annotated[str | None, Header()] = None,
+) -> str:
+    if not authorization or len(authorization) > 512:
+        raise unauthorized()
+    scheme, separator, credentials = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer" or not credentials.strip():
+        raise unauthorized()
+    return credentials.strip()
+
+
+def remove_expired_sessions(database_session: Session, now: datetime) -> int:
+    expired_ids = list(
+        database_session.scalars(
+            select(ChatSession.id).where(ChatSession.expires_at <= now)
+        )
+    )
+    if not expired_ids:
+        return 0
+    database_session.execute(
+        delete(Message).where(Message.session_id.in_(expired_ids))
+    )
+    database_session.execute(
+        delete(ChatSession).where(ChatSession.id.in_(expired_ids))
+    )
+    return len(expired_ids)
+
+
+def update_active_sessions_metric(database_session: Session, now: datetime) -> None:
+    active_count = database_session.scalar(
+        select(func.count())
+        .select_from(ChatSession)
+        .where(ChatSession.expires_at > now)
+    )
+    ACTIVE_SESSIONS.set(active_count or 0)
+
+
+def authenticate_session(
+    database_session: Session,
+    session_id: str,
+    token: str,
+) -> ChatSession:
+    chat_session = database_session.get(ChatSession, session_id)
+    if chat_session is None:
+        # Hashing even for a missing session makes valid/invalid IDs less distinguishable.
+        secrets.compare_digest(token_digest(token), "0" * 64)
+        raise unauthorized()
+
+    now = utc_now()
+    if as_utc(chat_session.expires_at) <= now:
+        database_session.execute(
+            delete(Message).where(Message.session_id == chat_session.id)
+        )
+        database_session.delete(chat_session)
+        database_session.commit()
+        update_active_sessions_metric(database_session, now)
+        logger.info(
+            "Sessão expirada removida",
+            extra={"session_ref": session_ref(session_id)},
+        )
+        raise unauthorized()
+
+    if not secrets.compare_digest(chat_session.token_hash, token_digest(token)):
+        logger.warning(
+            "Credencial de sessão rejeitada",
+            extra={"session_ref": session_ref(session_id)},
+        )
+        raise unauthorized()
+    return chat_session
+
+
+def persisted_history(database_session: Session, session_id: str) -> list[Any]:
+    records = database_session.scalars(
+        select(Message)
+        .where(Message.session_id == session_id)
+        .order_by(Message.id)
+    ).all()
+    history: list[Any] = []
+    for record in records:
+        if record.role == "user":
+            history.append(HumanMessage(content=record.content))
+        elif record.role == "assistant":
+            history.append(AIMessage(content=record.content))
+    return history
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 logger = setup_logging()
 tracer = setup_tracing()
-chat = build_chain()
-
-app = FastAPI()
-app.mount("/metrics", make_asgi_app())
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class ChatRequest(BaseModel):
-    session_id: str
-    message: str
 
 
-# ── Export ────────────────────────────────────────────────────────────────────
+def create_app(
+    database: Database | None = None,
+    chain: Any | None = None,
+    session_ttl_hours: float | None = None,
+) -> FastAPI:
+    database = database or Database()
+    chain = chain or build_chain()
+    session_ttl = resolve_session_ttl(session_ttl_hours)
 
-session_history: dict[str, list[dict]] = {}
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        database.create_schema()
+        with database.session_factory() as database_session:
+            now = utc_now()
+            if remove_expired_sessions(database_session, now):
+                database_session.commit()
+            update_active_sessions_metric(database_session, now)
+        yield
 
+    application = FastAPI(lifespan=lifespan)
+    application.state.database = database
+    application.state.chain = chain
+    application.mount("/metrics", make_asgi_app())
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-def record_message(session_id: str, role: str, content: str):
-    if session_id not in session_history:
-        session_history[session_id] = []
-    session_history[session_id].append({
-        "role": role,
-        "content": content,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    @application.post(
+        "/sessions",
+        response_model=SessionResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_session_endpoint(
+        response: Response,
+        database_session: Session = Depends(database.get_session),
+    ) -> SessionResponse:
+        now = utc_now()
+        if remove_expired_sessions(database_session, now):
+            database_session.flush()
 
-
-@app.post("/chat")
-def chat_endpoint(req: ChatRequest):
-    with tracer.start_as_current_span("interacao") as span:
-        span.set_attribute("session_id", req.session_id)
-        span.set_attribute("input_length", len(req.message))
-        span.set_attribute("model", MODEL_NAME)
-
-        record_message(req.session_id, "user", req.message)
-        inicio = time.perf_counter()
-        try:
-            resposta = chat.invoke(
-                {"input": req.message},
-                config={"configurable": {"session_id": req.session_id}},
+        new_session_id = str(uuid.uuid4())
+        session_token = secrets.token_urlsafe(32)
+        expires_at = now + session_ttl
+        database_session.add(
+            ChatSession(
+                id=new_session_id,
+                token_hash=token_digest(session_token),
+                created_at=now,
+                expires_at=expires_at,
             )
-            duracao = time.perf_counter() - inicio
+        )
+        database_session.commit()
+        update_active_sessions_metric(database_session, now)
 
-            span.set_attribute("response_length", len(resposta.content))
-            span.set_attribute("duration_seconds", round(duracao, 3))
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        logger.info(
+            "Sessão criada",
+            extra={"session_ref": session_ref(new_session_id)},
+        )
+        return SessionResponse(
+            session_id=uuid.UUID(new_session_id),
+            session_token=session_token,
+            expires_at=expires_at,
+        )
 
-            REQUEST_COUNT.labels(model=MODEL_NAME, status="ok").inc()
-            RESPONSE_DURATION.labels(model=MODEL_NAME).observe(duracao)
-            record_message(req.session_id, "assistant", resposta.content)
+    @application.post("/chat", response_model=ChatResponse)
+    def chat_endpoint(
+        req: ChatRequest,
+        response: Response,
+        token: str = Depends(get_bearer_token),
+        database_session: Session = Depends(database.get_session),
+    ) -> ChatResponse:
+        session_id = str(req.session_id)
+        chat_session = authenticate_session(database_session, session_id, token)
+        reference = session_ref(session_id)
 
-            logger.info(
-                "Interação concluída",
-                extra={
-                    "session_id": req.session_id,
-                    "input_length": len(req.message),
-                    "response_length": len(resposta.content),
-                    "duration_seconds": round(duracao, 3),
-                },
+        with tracer.start_as_current_span("interacao") as span:
+            span.set_attribute("session_ref", reference)
+            span.set_attribute("input_length", len(req.message))
+            span.set_attribute("model", MODEL_NAME)
+
+            history = persisted_history(database_session, session_id)
+            database_session.add(
+                Message(
+                    session_id=session_id,
+                    role="user",
+                    content=req.message,
+                    created_at=utc_now(),
+                )
             )
-            return {"response": resposta.content}
+            database_session.commit()
 
-        except (ConnectionError, TimeoutError, OSError) as exc:
-            REQUEST_COUNT.labels(model=MODEL_NAME, status="error").inc()
-            span.record_exception(exc)
-            logger.error(
-                "Erro de conexão com o modelo",
-                extra={"session_id": req.session_id, "error": str(exc)},
-            )
-            return {"response": "Erro de conexão com o modelo. Tente novamente."}
+            started_at = time.perf_counter()
+            try:
+                result = chain.invoke({"input": req.message, "history": history})
+                duration = time.perf_counter() - started_at
+                content = getattr(result, "content", result)
+                if not isinstance(content, str):
+                    content = str(content)
 
-        except Exception as exc:
-            REQUEST_COUNT.labels(model=MODEL_NAME, status="error").inc()
-            span.record_exception(exc)
-            logger.error(
-                "Erro inesperado",
-                extra={"session_id": req.session_id, "error": str(exc)},
-            )
-            return {"response": "Erro interno do servidor. Tente novamente."}
+                # Do not persist or return a response if the session expired while
+                # the model was generating it.
+                if as_utc(chat_session.expires_at) <= utc_now():
+                    database_session.execute(
+                        delete(Message).where(Message.session_id == session_id)
+                    )
+                    database_session.delete(chat_session)
+                    database_session.commit()
+                    update_active_sessions_metric(database_session, utc_now())
+                    raise unauthorized()
+
+                span.set_attribute("response_length", len(content))
+                span.set_attribute("duration_seconds", round(duration, 3))
+                REQUEST_COUNT.labels(model=MODEL_NAME, status="ok").inc()
+                RESPONSE_DURATION.labels(model=MODEL_NAME).observe(duration)
+
+                database_session.add(
+                    Message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=content,
+                        created_at=utc_now(),
+                    )
+                )
+                database_session.commit()
+
+                logger.info(
+                    "Interação concluída",
+                    extra={
+                        "session_ref": reference,
+                        "input_length": len(req.message),
+                        "response_length": len(content),
+                        "duration_seconds": round(duration, 3),
+                    },
+                )
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["Pragma"] = "no-cache"
+                return ChatResponse(response=content)
+
+            except HTTPException:
+                REQUEST_COUNT.labels(model=MODEL_NAME, status="error").inc()
+                raise
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                REQUEST_COUNT.labels(model=MODEL_NAME, status="error").inc()
+                span.record_exception(exc)
+                logger.error(
+                    "Erro de conexão com o modelo",
+                    extra={
+                        "session_ref": reference,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Erro de conexão com o modelo. Tente novamente.",
+                ) from exc
+            except Exception as exc:
+                REQUEST_COUNT.labels(model=MODEL_NAME, status="error").inc()
+                span.record_exception(exc)
+                logger.error(
+                    "Erro inesperado",
+                    extra={
+                        "session_ref": reference,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Erro interno do servidor. Tente novamente.",
+                ) from exc
+
+    @application.get("/export/{session_id}", response_model=ExportResponse)
+    def export_session(
+        session_id: UUID4,
+        response: Response,
+        token: str = Depends(get_bearer_token),
+        database_session: Session = Depends(database.get_session),
+    ) -> ExportResponse:
+        normalized_session_id = str(session_id)
+        authenticate_session(database_session, normalized_session_id, token)
+        messages = database_session.scalars(
+            select(Message)
+            .where(Message.session_id == normalized_session_id)
+            .order_by(Message.id)
+        ).all()
+
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return ExportResponse(
+            session_id=session_id,
+            exported_at=utc_now(),
+            total_messages=len(messages),
+            messages=[
+                ExportedMessage(
+                    role=message.role,
+                    content=message.content,
+                    timestamp=as_utc(message.created_at),
+                )
+                for message in messages
+            ],
+        )
+
+    return application
 
 
-@app.get("/export/{session_id}")
-def export_session(session_id: str):
-    messages = session_history.get(session_id)
-    if not messages:
-        raise HTTPException(status_code=404, detail="Sessão não encontrada")
-    return {
-        "session_id": session_id,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-        "total_messages": len(messages),
-        "messages": messages,
-    }
+app = create_app()

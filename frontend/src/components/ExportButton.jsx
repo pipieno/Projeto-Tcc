@@ -1,20 +1,32 @@
-import { exportSession } from '../services/api'
+import { exportSession, isInvalidSessionError } from '../services/api'
 
-const btn = {
-  padding: '8px 16px',
-  background: 'transparent',
-  border: '1px solid #1a73e8',
-  color: '#1a73e8',
-  borderRadius: '6px',
-  cursor: 'pointer',
-  fontSize: '0.8rem',
-  fontWeight: 500,
+function isSessionValid(sessionId, sessionToken, sessionExpiresAt) {
+  const expiresAt = Date.parse(sessionExpiresAt)
+  return Boolean(
+    sessionId
+    && sessionToken
+    && !Number.isNaN(expiresAt)
+    && expiresAt > Date.now()
+  )
 }
 
-export default function ExportButton({ sessionId, messages }) {
+export default function ExportButton({
+  sessionId,
+  sessionToken,
+  sessionExpiresAt,
+  messages,
+  onSessionInvalid,
+}) {
+  const canExport = isSessionValid(sessionId, sessionToken, sessionExpiresAt)
+
   async function handleExport(format) {
+    if (!isSessionValid(sessionId, sessionToken, sessionExpiresAt)) {
+      onSessionInvalid?.(sessionToken)
+      return
+    }
+
     try {
-      const data = await exportSession(sessionId)
+      const data = await exportSession(sessionId, sessionToken)
 
       if (format === 'json') {
         download(JSON.stringify(data, null, 2), `chat-${sessionId}.json`, 'application/json')
@@ -26,8 +38,14 @@ export default function ExportButton({ sessionId, messages }) {
         .map(m => `${m.role},${m.timestamp},"${m.content.replace(/"/g, '""')}"`)
         .join('\n')
       download(header + rows, `chat-${sessionId}.csv`, 'text/csv')
-    } catch (e) {
-      alert('Erro ao exportar: ' + e.message)
+    } catch (error) {
+      if (isInvalidSessionError(error)) {
+        onSessionInvalid?.(sessionToken)
+        alert('A sessão expirou. Envie uma nova mensagem para iniciar outra conversa.')
+        return
+      }
+
+      alert('Erro ao exportar: ' + error.message)
     }
   }
 
@@ -44,9 +62,9 @@ export default function ExportButton({ sessionId, messages }) {
   if (!messages.length) return null
 
   return (
-    <div style={{ display: 'flex', gap: 8 }}>
-      <button style={btn} onClick={() => handleExport('json')}>⬇ JSON</button>
-      <button style={btn} onClick={() => handleExport('csv')}>⬇ CSV</button>
+    <div className="export-wrap">
+      <button className="export-btn" onClick={() => handleExport('json')} title="Exportar conversa em JSON" disabled={!canExport}>JSON</button>
+      <button className="export-btn" onClick={() => handleExport('csv')} title="Exportar conversa em CSV" disabled={!canExport}>CSV</button>
     </div>
   )
 }

@@ -1,4 +1,24 @@
 services:
+  mysql:
+    image: mysql:8.4
+    container_name: mysql
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:?defina DB_NAME no arquivo .env}
+      MYSQL_USER: ${DB_USER:?defina DB_USER no arquivo .env}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?defina DB_PASSWORD no arquivo .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?defina MYSQL_ROOT_PASSWORD no arquivo .env}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -u root --password="$$MYSQL_ROOT_PASSWORD" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
   agente:
     build: ./backend
     container_name: agente
@@ -8,13 +28,23 @@ services:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma3:4b}
       - JAEGER_ENDPOINT=http://jaeger:4317
+      - DB_HOST=mysql
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_NAME=${DB_NAME:?defina DB_NAME no arquivo .env}
+      - DB_USER=${DB_USER:?defina DB_USER no arquivo .env}
+      - DB_PASSWORD=${DB_PASSWORD:?defina DB_PASSWORD no arquivo .env}
+      - SESSION_TTL_HOURS=${SESSION_TTL_HOURS:-24}
     volumes:
       - ./logs:/app/logs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - jaeger
-      - loki
+      mysql:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+      loki:
+        condition: service_started
     restart: unless-stopped
 
 
@@ -84,8 +114,6 @@ services:
   node-exporter:
     image: prom/node-exporter:latest
     container_name: node-exporter
-    ports:
-      - "9100:9100"
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -108,6 +136,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  mysql_data:
   prometheus_data:
   grafana_data:
   loki_data:
