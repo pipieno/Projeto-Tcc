@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 
 from backend.app import create_app, utc_now
 from backend.database import ChatSession, Database, Message
+from backend.places import Place
 
 
 class FakeChain:
@@ -20,6 +21,43 @@ class FakeChain:
     def invoke(self, payload: dict):
         self.calls.append(payload)
         return SimpleNamespace(content=f"Resposta: {payload['input']}")
+
+
+class FakePlaceFinder:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def search(self, category):
+        self.calls.append(category.key)
+        if category.key == "hospital":
+            return [
+                Place(
+                    name="Hospital da Estrada",
+                    address="Rua José Picolli, 200",
+                    distance_meters=500,
+                    latitude=-26.471,
+                    longitude=-49.127,
+                )
+            ]
+        if category.key == "bank":
+            return [
+                Place(
+                    name="Banco da Estrada",
+                    address="Rua José Picolli, 300",
+                    distance_meters=600,
+                    latitude=-26.472,
+                    longitude=-49.128,
+                )
+            ]
+        return [
+            Place(
+                name="Café da Estrada",
+                address="Rua José Picolli, 100",
+                distance_meters=350,
+                latitude=-26.4701,
+                longitude=-49.1265,
+            )
+        ]
 
 
 pytestmark = pytest.mark.anyio
@@ -34,9 +72,11 @@ def anyio_backend():
 async def api():
     database = Database("sqlite+pysqlite:///:memory:")
     chain = FakeChain()
+    place_finder = FakePlaceFinder()
     application = create_app(
         database=database,
         chain=chain,
+        place_finder=place_finder,
         session_ttl_hours=1,
     )
     transport = httpx.ASGITransport(app=application)
@@ -46,7 +86,7 @@ async def api():
                 transport=transport,
                 base_url="http://testserver",
             ) as client:
-                yield client, database, chain
+                yield client, database, chain, place_finder
     finally:
         database.dispose()
 
@@ -68,7 +108,7 @@ def authorization(token: str) -> dict[str, str]:
 
 
 async def test_session_token_is_hashed_before_persistence(api):
-    client, database, _chain = api
+    client, database, _chain, _place_finder = api
     created = await create_session(client)
 
     with database.session_factory() as database_session:
@@ -88,7 +128,7 @@ async def test_session_token_is_hashed_before_persistence(api):
     ],
 )
 async def test_protected_endpoints_reject_missing_token(api, method, path):
-    client, _database, chain = api
+    client, _database, chain, _place_finder = api
     created = await create_session(client)
     url = path.format(session_id=created["session_id"])
 
@@ -107,7 +147,7 @@ async def test_protected_endpoints_reject_missing_token(api, method, path):
 
 
 async def test_wrong_token_is_rejected(api):
-    client, _database, chain = api
+    client, _database, chain, _place_finder = api
     created = await create_session(client)
 
     response = await client.post(
@@ -121,7 +161,7 @@ async def test_wrong_token_is_rejected(api):
 
 
 async def test_token_from_another_session_cannot_read_or_continue_chat(api):
-    client, _database, chain = api
+    client, _database, chain, _place_finder = api
     first = await create_session(client)
     second = await create_session(client)
 
@@ -142,7 +182,7 @@ async def test_token_from_another_session_cannot_read_or_continue_chat(api):
 
 
 async def test_valid_token_persists_history_and_allows_export(api):
-    client, _database, chain = api
+    client, _database, chain, _place_finder = api
     created = await create_session(client)
     headers = authorization(created["session_token"])
 
@@ -185,8 +225,145 @@ async def test_valid_token_persists_history_and_allows_export(api):
     ]
 
 
+async def test_last_question_on_new_session_does_not_invent_history(api):
+    client, _database, chain, _place_finder = api
+    created = await create_session(client)
+
+    response = await client.post(
+        "/chat",
+        headers=authorization(created["session_token"]),
+        json={
+            "session_id": created["session_id"],
+            "message": "Qual foi a minha última pergunta?",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "response": (
+            "Esta é a sua primeira pergunta nesta conversa; "
+            "ainda não há uma pergunta anterior."
+        )
+    }
+    assert not chain.calls
+
+
+async def test_last_question_is_returned_from_persisted_history(api):
+    client, _database, chain, _place_finder = api
+    created = await create_session(client)
+    headers = authorization(created["session_token"])
+
+    await client.post(
+        "/chat",
+        headers=headers,
+        json={
+            "session_id": created["session_id"],
+            "message": "Como faço para me associar?",
+        },
+    )
+    response = await client.post(
+        "/chat",
+        headers=headers,
+        json={
+            "session_id": created["session_id"],
+            "message": "qual foi a ultima pergunta q eu mandei",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "response": 'Sua última pergunta foi: "Como faço para me associar?"'
+    }
+    assert len(chain.calls) == 1
+
+
+async def test_local_business_search_uses_fixed_neighborhood_area(api):
+    client, _database, chain, place_finder = api
+    created = await create_session(client)
+
+    response = await client.post(
+        "/chat",
+        headers=authorization(created["session_token"]),
+        json={
+            "session_id": created["session_id"],
+            "message": "Quais são os bons cafés na Estrada Nova?",
+        },
+    )
+
+    assert response.status_code == 200
+    content = response.json()["response"]
+    assert "Café da Estrada" in content
+    assert "Rua José Picolli, 100" in content
+    assert "https://www.google.com/maps/search/" in content
+    assert place_finder.calls == ["cafe"]
+    assert not chain.calls
+
+
+async def test_category_word_without_location_intent_stays_with_model(api):
+    client, _database, chain, place_finder = api
+    created = await create_session(client)
+
+    response = await client.post(
+        "/chat",
+        headers=authorization(created["session_token"]),
+        json={
+            "session_id": created["session_id"],
+            "message": "A AMOBEN serve café nas reuniões?",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "response": "Resposta: A AMOBEN serve café nas reuniões?"
+    }
+    assert len(chain.calls) == 1
+    assert not place_finder.calls
+
+
+async def test_hospital_in_this_area_is_treated_as_neighborhood_search(api):
+    client, _database, chain, place_finder = api
+    created = await create_session(client)
+
+    response = await client.post(
+        "/chat",
+        headers=authorization(created["session_token"]),
+        json={
+            "session_id": created["session_id"],
+            "message": "Tem algum hospital nesta área?",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Hospital da Estrada" in response.json()["response"]
+    assert place_finder.calls == ["hospital"]
+    assert not chain.calls
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "e bancos?",
+        "então quero conhecer bancos na Estrada Nov",
+    ],
+)
+async def test_bank_follow_up_and_neighborhood_typo_are_understood(api, message):
+    client, _database, chain, place_finder = api
+    created = await create_session(client)
+
+    response = await client.post(
+        "/chat",
+        headers=authorization(created["session_token"]),
+        json={"session_id": created["session_id"], "message": message},
+    )
+
+    assert response.status_code == 200
+    assert "Banco da Estrada" in response.json()["response"]
+    assert place_finder.calls == ["bank"]
+    assert not chain.calls
+
+
 async def test_expired_session_is_rejected_and_its_messages_are_removed(api):
-    client, database, _chain = api
+    client, database, _chain, _place_finder = api
     created = await create_session(client)
     headers = authorization(created["session_token"])
     chat_response = await client.post(

@@ -175,6 +175,51 @@ h1, h2, h3, .serif { font-family: 'Libre Baskerville', Georgia, serif; }
 .bubble.user { background: linear-gradient(135deg, var(--teal), var(--teal-dark)); color: #fff; border-radius: 16px 16px 4px 16px; }
 .bubble.bot { background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 16px 16px 16px 4px; }
 .bubble.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; border-radius: 16px 16px 16px 4px; }
+.bubble a { color: var(--teal-dark); font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+.bubble a:hover { color: var(--teal); }
+.map-preview {
+  position: relative;
+  display: block;
+  width: min(270px, 100%);
+  height: 145px;
+  margin-top: 7px;
+  overflow: hidden;
+  background: #e2e8f0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, .1);
+}
+.map-preview iframe { width: 100%; height: 100%; border: 0; pointer-events: none; }
+.map-preview-open {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  padding: 10px;
+  background: linear-gradient(180deg, transparent 45%, rgba(15, 23, 42, .62));
+  text-decoration: none !important;
+}
+.map-preview-open span {
+  padding: 6px 9px;
+  color: #fff;
+  font-size: .76rem;
+  line-height: 1;
+  background: rgba(15, 23, 42, .82);
+  border-radius: 999px;
+}
+.map-preview-attribution {
+  position: absolute;
+  z-index: 2;
+  top: 5px;
+  right: 5px;
+  padding: 2px 5px;
+  color: #334155 !important;
+  font-size: .58rem;
+  line-height: 1.2;
+  background: rgba(255, 255, 255, .9);
+  border-radius: 4px;
+  text-decoration: none !important;
+}
 .bubble-meta { font-size: .68rem; color: #94a3b8; margin-top: 4px; }
 
 .chat-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; justify-content: center; }

@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -31,8 +32,20 @@ from sqlalchemy.orm import Session
 
 try:  # Supports both `uvicorn app:app` and `import backend.app`.
     from .database import ChatSession, Database, Message
+    from .places import (
+        OverpassPlaceFinder,
+        PlaceSearchUnavailable,
+        detect_place_category,
+        format_place_results,
+    )
 except ImportError:  # pragma: no cover - exercised by the Docker entrypoint
     from database import ChatSession, Database, Message
+    from places import (
+        OverpassPlaceFinder,
+        PlaceSearchUnavailable,
+        detect_place_category,
+        format_place_results,
+    )
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -79,7 +92,6 @@ class RedactSessionIdFilter(logging.Filter):
 
 
 def setup_logging() -> logging.Logger:
-    Path("logs").mkdir(exist_ok=True)
     logger = logging.getLogger("agente")
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -88,12 +100,22 @@ def setup_logging() -> logging.Logger:
         formatter = jsonlogger.JsonFormatter(
             fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
         )
-        file_handler = logging.FileHandler("logs/agente.log")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
+
+        try:
+            log_directory = Path(os.getenv("LOG_DIRECTORY", "logs"))
+            log_directory.mkdir(exist_ok=True)
+            file_handler = logging.FileHandler(log_directory / "agente.log")
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except OSError as exc:
+            logger.warning(
+                "Log em arquivo indisponível; mantendo saída no terminal",
+                extra={"error_type": type(exc).__name__},
+            )
+
         logger._agente_configured = True  # type: ignore[attr-defined]
 
     access_filter = RedactSessionIdFilter()
@@ -326,6 +348,65 @@ def persisted_history(database_session: Session, session_id: str) -> list[Any]:
     return history
 
 
+def normalize_intent(value: str) -> str:
+    value = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", value.casefold())
+        if not unicodedata.combining(character)
+    )
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
+def asks_for_previous_user_message(value: str) -> bool:
+    """Identify common requests to recall the user's previous message."""
+
+    normalized = normalize_intent(value)
+    tokens = set(normalized.split())
+    refers_to_previous = bool(
+        tokens.intersection({"ultima", "ultimo", "anterior", "antes"})
+    )
+    refers_to_message = bool(
+        tokens.intersection(
+            {
+                "pergunta",
+                "mensagem",
+                "perguntei",
+                "mandei",
+                "enviei",
+                "escrevi",
+                "disse",
+                "fiz",
+            }
+        )
+    )
+    refers_to_user = bool(
+        tokens.intersection(
+            {"eu", "meu", "minha", "mandei", "enviei", "escrevi", "disse", "fiz"}
+        )
+    )
+    return refers_to_previous and refers_to_message and refers_to_user
+
+
+def conversation_memory_response(value: str, history: list[Any]) -> str | None:
+    if not asks_for_previous_user_message(value):
+        return None
+
+    previous_message = next(
+        (
+            message.content
+            for message in reversed(history)
+            if isinstance(message, HumanMessage)
+        ),
+        None,
+    )
+    if previous_message is None:
+        return (
+            "Esta é a sua primeira pergunta nesta conversa; "
+            "ainda não há uma pergunta anterior."
+        )
+    return f'Sua última pergunta foi: "{previous_message}"'
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 logger = setup_logging()
@@ -335,10 +416,12 @@ tracer = setup_tracing()
 def create_app(
     database: Database | None = None,
     chain: Any | None = None,
+    place_finder: Any | None = None,
     session_ttl_hours: float | None = None,
 ) -> FastAPI:
     database = database or Database()
     chain = chain or build_chain()
+    place_finder = place_finder or OverpassPlaceFinder()
     session_ttl = resolve_session_ttl(session_ttl_hours)
 
     @asynccontextmanager
@@ -354,6 +437,7 @@ def create_app(
     application = FastAPI(lifespan=lifespan)
     application.state.database = database
     application.state.chain = chain
+    application.state.place_finder = place_finder
     application.mount("/metrics", make_asgi_app())
     application.add_middleware(
         CORSMiddleware,
@@ -430,11 +514,29 @@ def create_app(
 
             started_at = time.perf_counter()
             try:
-                result = chain.invoke({"input": req.message, "history": history})
+                content = conversation_memory_response(req.message, history)
+                response_source = "conversation_memory"
+                if content is None:
+                    category = detect_place_category(req.message)
+                    if category is not None:
+                        response_source = "openstreetmap"
+                        try:
+                            places = place_finder.search(category)
+                            content = format_place_results(category, places)
+                        except PlaceSearchUnavailable:
+                            content = (
+                                "Não consegui consultar o mapa da Estrada Nova agora. "
+                                "Tente novamente em alguns instantes."
+                            )
+                            response_source = "openstreetmap_error"
+                    else:
+                        response_source = "model"
+                        result = chain.invoke({"input": req.message, "history": history})
+                        content = getattr(result, "content", result)
+                        if not isinstance(content, str):
+                            content = str(content)
+
                 duration = time.perf_counter() - started_at
-                content = getattr(result, "content", result)
-                if not isinstance(content, str):
-                    content = str(content)
 
                 # Do not persist or return a response if the session expired while
                 # the model was generating it.
@@ -449,6 +551,7 @@ def create_app(
 
                 span.set_attribute("response_length", len(content))
                 span.set_attribute("duration_seconds", round(duration, 3))
+                span.set_attribute("response_source", response_source)
                 REQUEST_COUNT.labels(model=MODEL_NAME, status="ok").inc()
                 RESPONSE_DURATION.labels(model=MODEL_NAME).observe(duration)
 

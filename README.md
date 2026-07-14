@@ -12,6 +12,7 @@ O projeto consiste em um assistente virtual da **AMOBEN** (Associação de Morad
 - **Métricas** — `prometheus-client` exposto no FastAPI → Prometheus → Grafana
 - **Rastreamento distribuído** — OpenTelemetry SDK → Jaeger via OTLP/gRPC
 - **Persistência de conversas** — sessões autenticadas e mensagens armazenadas em MySQL
+- **Busca no bairro** — estabelecimentos do OpenStreetMap próximos ao centro fixo da Estrada Nova
 
 ---
 
@@ -138,6 +139,7 @@ Projeto-Tcc/
 ├── backend/
 │   ├── app.py              # FastAPI + LangChain + observabilidade
 │   ├── database.py         # Persistência e autenticação das sessões no MySQL
+│   ├── places.py           # Busca de estabelecimentos no OpenStreetMap
 │   ├── system_prompt.txt   # Prompt do agente AMOBEN
 │   ├── requirements.txt
 │   └── Dockerfile
@@ -180,6 +182,26 @@ Projeto-Tcc/
 | `DB_PASSWORD` | sem valor seguro padrão | Senha do usuário da aplicação |
 | `MYSQL_ROOT_PASSWORD` | sem valor seguro padrão | Senha administrativa usada na inicialização do MySQL |
 | `SESSION_TTL_HOURS` | `24` | Validade do token de uma sessão, em horas |
+| `OVERPASS_URL` | `https://overpass-api.de/api/interpreter` | API usada para consultar dados do OpenStreetMap |
+| `NEIGHBORHOOD_CENTER_LAT` | `-26.4700649` | Latitude do ponto `place=suburb` da Estrada Nova no OpenStreetMap |
+| `NEIGHBORHOOD_CENTER_LON` | `-49.1264936` | Longitude do ponto central do bairro |
+| `NEIGHBORHOOD_SEARCH_RADIUS_METERS` | `1800` | Raio da área de busca a partir do centro fixo |
+| `PLACE_SEARCH_CACHE_TTL_SECONDS` | `600` | Tempo de cache das buscas por categoria |
+| `PLACE_SEARCH_MAX_RESULTS` | `5` | Máximo de locais devolvidos por busca |
+
+## Busca de estabelecimentos na Estrada Nova
+
+Perguntas como “bons cafés na Estrada Nova”, “onde há farmácia?” ou “quais
+mercados existem no bairro?” consultam o OpenStreetMap em tempo real. A posição
+do usuário não é solicitada nem enviada ao backend: todas as buscas usam o ponto
+fixo do bairro configurado no `.env`.
+
+Como o OpenStreetMap possui um ponto para a Estrada Nova, mas não um polígono de
+limite do bairro, a aplicação usa centro e raio. Locais explicitamente marcados
+como pertencentes a outro bairro são descartados. Os resultados são ordenados
+por distância, e não por avaliação; o cadastro público pode estar incompleto.
+A prévia continua usando o mapa aberto, enquanto o clique na localização abre o
+Google Maps por uma URL gratuita que não exige chave de API.
 
 ## Proteção e persistência das conversas
 

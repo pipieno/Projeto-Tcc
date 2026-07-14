@@ -68,6 +68,116 @@ function now() {
   return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
 }
 
+function mapCoordinates(value) {
+  try {
+    const url = new URL(value)
+    let latitude
+    let longitude
+
+    if (['openstreetmap.org', 'www.openstreetmap.org'].includes(url.hostname)) {
+      latitude = Number(url.searchParams.get('mlat'))
+      longitude = Number(url.searchParams.get('mlon'))
+    } else if (
+      ['google.com', 'www.google.com', 'maps.google.com'].includes(url.hostname)
+      && url.pathname.startsWith('/maps/search')
+    ) {
+      const [rawLatitude, rawLongitude] = (url.searchParams.get('query') || '').split(',')
+      latitude = Number(rawLatitude)
+      longitude = Number(rawLongitude)
+    } else {
+      return null
+    }
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
+
+    return { latitude, longitude }
+  } catch {
+    return null
+  }
+}
+
+function mapPreviewUrl(value) {
+  const coordinates = mapCoordinates(value)
+  if (!coordinates) return null
+
+  const { latitude, longitude } = coordinates
+  try {
+    const latitudeOffset = 0.0025
+    const longitudeOffset = 0.0045
+    const params = new URLSearchParams({
+      bbox: [
+        longitude - longitudeOffset,
+        latitude - latitudeOffset,
+        longitude + longitudeOffset,
+        latitude + latitudeOffset,
+      ].join(','),
+      layer: 'mapnik',
+      marker: `${latitude},${longitude}`,
+    })
+    return `https://www.openstreetmap.org/export/embed.html?${params}`
+  } catch {
+    return null
+  }
+}
+
+function MapPreview({ url, index }) {
+  const previewUrl = mapPreviewUrl(url)
+  if (!previewUrl) return null
+
+  const coordinates = mapCoordinates(url)
+  const googleMapsUrl = coordinates
+    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${coordinates.latitude},${coordinates.longitude}`)}`
+    : url
+
+  return (
+    <span className="map-preview">
+      <iframe
+        src={previewUrl}
+        title={`Prévia da localização ${index + 1}`}
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        sandbox="allow-scripts allow-same-origin"
+        tabIndex="-1"
+        aria-hidden="true"
+      />
+      <a
+        className="map-preview-open"
+        href={googleMapsUrl}
+        target="_blank"
+        rel="noreferrer"
+        aria-label="Abrir esta localização no Google Maps"
+      >
+        <span>⌖ Abrir no Google Maps</span>
+      </a>
+      <a
+        className="map-preview-attribution"
+        href="https://www.openstreetmap.org/copyright"
+        target="_blank"
+        rel="noreferrer"
+      >
+        © OpenStreetMap
+      </a>
+    </span>
+  )
+}
+
+function MessageContent({ content }) {
+  return content.split(/(https?:\/\/[^\s]+)/g).map((part, index) => {
+    if (!part.startsWith('http://') && !part.startsWith('https://')) return part
+
+    const previewUrl = mapPreviewUrl(part)
+    if (previewUrl) {
+      return <MapPreview key={`${part}-${index}`} url={part} index={index} />
+    }
+
+    return (
+      <a key={`${part}-${index}`} href={part} target="_blank" rel="noreferrer">
+        Abrir link
+      </a>
+    )
+  })
+}
+
 export default function Chat() {
   const [open, setOpen]         = useState(false)
   const [messages, setMessages] = useState([])
@@ -256,7 +366,7 @@ export default function Chat() {
               <div className={`bubble ${m.role}`}>
                 {m.id === 'typing'
                   ? <><span className="typing-dot" /><span className="typing-dot" /><span className="typing-dot" /></>
-                  : m.content}
+                  : <MessageContent content={m.content} />}
               </div>
               {m.ts && <div className="bubble-meta">{m.ts}</div>}
             </div>
