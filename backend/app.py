@@ -523,7 +523,8 @@ def create_app(
                         try:
                             places = place_finder.search(category)
                             content = format_place_results(category, places)
-                        except PlaceSearchUnavailable:
+                        except PlaceSearchUnavailable as exc:
+                            span.record_exception(exc)
                             content = (
                                 "Não consegui consultar o mapa da Estrada Nova agora. "
                                 "Tente novamente em alguns instantes."
@@ -552,7 +553,8 @@ def create_app(
                 span.set_attribute("response_length", len(content))
                 span.set_attribute("duration_seconds", round(duration, 3))
                 span.set_attribute("response_source", response_source)
-                REQUEST_COUNT.labels(model=MODEL_NAME, status="ok").inc()
+                interaction_status = "error" if response_source == "openstreetmap_error" else "ok"
+                REQUEST_COUNT.labels(model=MODEL_NAME, status=interaction_status).inc()
                 RESPONSE_DURATION.labels(model=MODEL_NAME).observe(duration)
 
                 database_session.add(
@@ -572,6 +574,7 @@ def create_app(
                         "input_length": len(req.message),
                         "response_length": len(content),
                         "duration_seconds": round(duration, 3),
+                        "response_source": response_source,
                     },
                 )
                 response.headers["Cache-Control"] = "no-store"

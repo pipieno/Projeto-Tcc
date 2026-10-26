@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import math
 import os
 import re
 import threading
 import time
 import unicodedata
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
+
+import httpx
 
 
 DEFAULT_CENTER_LAT = -26.4700649
 DEFAULT_CENTER_LON = -49.1264936
 DEFAULT_RADIUS_METERS = 1_800
 DEFAULT_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+DEFAULT_OVERPASS_FALLBACK_URL = "https://overpass.private.coffee/api/interpreter"
+MAX_SEARCH_ATTEMPTS = 3
+logger = logging.getLogger("agente")
 
 
 def normalize_text(value: str) -> str:
@@ -306,51 +312,137 @@ class OverpassPlaceFinder:
         self.timeout_seconds = _integer_setting(
             "PLACE_SEARCH_TIMEOUT_SECONDS", 15, 2, 60
         )
+        self.total_timeout_seconds = _integer_setting(
+            "PLACE_SEARCH_TOTAL_TIMEOUT_SECONDS", 18, 2, 120
+        )
         self.cache_ttl_seconds = _integer_setting(
             "PLACE_SEARCH_CACHE_TTL_SECONDS", 600, 0, 86_400
         )
         self.max_results = _integer_setting("PLACE_SEARCH_MAX_RESULTS", 5, 1, 10)
         self.overpass_url = os.getenv("OVERPASS_URL", DEFAULT_OVERPASS_URL)
-        if not self.overpass_url.startswith("https://"):
+        fallback_url = os.getenv("OVERPASS_FALLBACK_URL", DEFAULT_OVERPASS_FALLBACK_URL)
+        self.endpoints = list(dict.fromkeys(
+            url.strip() for url in (self.overpass_url, fallback_url) if url.strip()
+        ))
+        if not self.endpoints or not self.overpass_url.strip():
             raise RuntimeError("OVERPASS_URL deve usar HTTPS")
+        for endpoint in self.endpoints:
+            parsed_url = urllib.parse.urlsplit(endpoint)
+            if parsed_url.scheme != "https" or not parsed_url.hostname:
+                raise RuntimeError("Os endpoints Overpass devem usar HTTPS")
         self._cache: dict[str, tuple[float, list[Place]]] = {}
         self._cache_lock = threading.Lock()
 
-    def _query(self, category: PlaceCategory) -> str:
+    def _query(self, category: PlaceCategory, timeout_seconds: int | None = None) -> str:
         searches = "\n".join(
             f"nwr{osm_filter}(around:{self.radius_meters},{self.center_lat},{self.center_lon});"
             for osm_filter in category.filters
         )
-        return f"[out:json][timeout:{self.timeout_seconds}];\n(\n{searches}\n);\nout center tags;"
+        timeout_seconds = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        return f"[out:json][timeout:{timeout_seconds}];\n(\n{searches}\n);\nout center tags;"
 
     def _fetch(self, category: PlaceCategory) -> dict[str, Any]:
-        separator = "&" if "?" in self.overpass_url else "?"
-        request_url = (
-            f"{self.overpass_url}{separator}"
-            f"{urllib.parse.urlencode({'data': self._query(category)})}"
-        )
-        request = urllib.request.Request(
-            request_url,
-            headers={
-                "User-Agent": "AMOBEN-TCC/1.0 (OpenStreetMap place search)",
-            },
-            method="GET",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds + 3) as response:
-                raw_response = response.read(2_000_001)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise PlaceSearchUnavailable("OpenStreetMap indisponível") from exc
+            # The synchronous chat handler runs in FastAPI's thread pool. An async
+            # deadline also bounds DNS, streaming bodies and retry delays together.
+            return asyncio.run(self._fetch_with_retries(category))
+        except TimeoutError as exc:
+            logger.warning(
+                "Tempo total da busca no mapa esgotado",
+                extra={"category": category.key, "timeout_seconds": self.total_timeout_seconds},
+            )
+            raise PlaceSearchUnavailable("Tempo total da busca no mapa esgotado") from exc
 
-        if len(raw_response) > 2_000_000:
-            raise PlaceSearchUnavailable("Resposta do OpenStreetMap excedeu o limite")
+    @staticmethod
+    def _retry_after(response: httpx.Response) -> float:
+        value = response.headers.get("Retry-After", "0")
         try:
-            parsed = json.loads(raw_response)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise PlaceSearchUnavailable("Resposta inválida do OpenStreetMap") from exc
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("elements"), list):
-            raise PlaceSearchUnavailable("Resposta inesperada do OpenStreetMap")
-        return parsed
+            seconds = float(value)
+        except ValueError:
+            try:
+                seconds = parsedate_to_datetime(value).timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                return 0.0
+        return max(0.0, seconds) if math.isfinite(seconds) else 0.0
+
+    async def _fetch_with_retries(self, category: PlaceCategory) -> dict[str, Any]:
+        blocked_until: dict[str, float] = {}
+        last_error: Exception | None = None
+        attempt_timeout = min(
+            self.timeout_seconds + 3,
+            self.total_timeout_seconds / MAX_SEARCH_ATTEMPTS,
+        )
+        query_timeout = min(self.timeout_seconds, max(1, math.ceil(attempt_timeout) - 1))
+        async with asyncio.timeout(self.total_timeout_seconds):
+            async with httpx.AsyncClient(
+                headers={"User-Agent": "AMOBEN-TCC/1.0 (OpenStreetMap place search)"},
+                follow_redirects=True,
+            ) as client:
+                for attempt in range(MAX_SEARCH_ATTEMPTS):
+                    if attempt:
+                        await asyncio.sleep(0.5 * 2 ** (attempt - 1))
+                    candidates = self.endpoints[attempt % len(self.endpoints):] + self.endpoints[:attempt % len(self.endpoints)]
+                    endpoint = next((
+                        url for url in candidates
+                        if blocked_until.get(url, 0) <= time.monotonic()
+                    ), None)
+                    if endpoint is None:
+                        break
+                    try:
+                        async with asyncio.timeout(attempt_timeout):
+                            async with client.stream(
+                                "POST", endpoint,
+                                data={"data": self._query(category, query_timeout)},
+                                timeout=attempt_timeout,
+                            ) as response:
+                                response.raise_for_status()
+                                raw_response = bytearray()
+                                async for chunk in response.aiter_bytes():
+                                    raw_response.extend(chunk)
+                                    if len(raw_response) > 2_000_000:
+                                        raise PlaceSearchUnavailable("Resposta do OpenStreetMap excedeu o limite")
+                            try:
+                                parsed = json.loads(raw_response)
+                            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                                raise PlaceSearchUnavailable("Resposta inválida do OpenStreetMap") from exc
+                            if not isinstance(parsed, dict) or not isinstance(parsed.get("elements"), list):
+                                raise PlaceSearchUnavailable("Resposta inesperada do OpenStreetMap")
+                            # Overpass may return HTTP 200 with partial results after
+                            # a query timeout. Never cache those as a successful search.
+                            if parsed.get("remark"):
+                                raise PlaceSearchUnavailable("OpenStreetMap retornou resultados incompletos")
+                        if attempt:
+                            logger.info(
+                                "Busca no mapa recuperada após nova tentativa",
+                                extra={"category": category.key, "endpoint": urllib.parse.urlsplit(endpoint).hostname, "attempt": attempt + 1},
+                            )
+                        return parsed
+                    except (httpx.HTTPError, TimeoutError, PlaceSearchUnavailable) as exc:
+                        last_error = exc
+                        status_code = None
+                        retryable = True
+                        if isinstance(exc, httpx.HTTPStatusError):
+                            status_code = exc.response.status_code
+                            retryable = status_code in {406, 408, 425, 429, 500, 502, 503, 504}
+                            cooldown = self._retry_after(exc.response)
+                            if status_code in {406, 429}:
+                                cooldown = max(30.0, cooldown)
+                            blocked_until[endpoint] = time.monotonic() + cooldown
+                        logger.warning(
+                            "Falha na consulta ao mapa",
+                            extra={
+                                "category": category.key,
+                                "endpoint": urllib.parse.urlsplit(endpoint).hostname,
+                                "attempt": attempt + 1,
+                                "error_type": type(exc).__name__,
+                                "error_reason": str(exc)[:300] or "Tempo limite da tentativa esgotado",
+                                "http_status": status_code,
+                                "retryable": retryable,
+                            },
+                        )
+                        if not retryable:
+                            break
+        raise PlaceSearchUnavailable("OpenStreetMap indisponível após as tentativas") from last_error
 
     def _parse_places(self, payload: dict[str, Any]) -> list[Place]:
         places: list[Place] = []
@@ -422,7 +514,7 @@ class OverpassPlaceFinder:
 
         places = self._parse_places(self._fetch(category))
         with self._cache_lock:
-            self._cache[category.key] = (now, places)
+            self._cache[category.key] = (time.monotonic(), places)
         return list(places)
 
 

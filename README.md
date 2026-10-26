@@ -183,13 +183,27 @@ Projeto-Tcc/
 | `MYSQL_ROOT_PASSWORD` | sem valor seguro padrão | Senha administrativa usada na inicialização do MySQL |
 | `SESSION_TTL_HOURS` | `24` | Validade do token de uma sessão, em horas |
 | `OVERPASS_URL` | `https://overpass-api.de/api/interpreter` | API usada para consultar dados do OpenStreetMap |
+| `OVERPASS_FALLBACK_URL` | `https://overpass.private.coffee/api/interpreter` | Servidor de reserva; vazio desativa a reserva |
 | `NEIGHBORHOOD_CENTER_LAT` | `-26.4700649` | Latitude do ponto `place=suburb` da Estrada Nova no OpenStreetMap |
 | `NEIGHBORHOOD_CENTER_LON` | `-49.1264936` | Longitude do ponto central do bairro |
 | `NEIGHBORHOOD_SEARCH_RADIUS_METERS` | `1800` | Raio da área de busca a partir do centro fixo |
+| `PLACE_SEARCH_TIMEOUT_SECONDS` | `15` | Limite solicitado à API para executar uma consulta, reduzido conforme o tempo disponível por tentativa |
+| `PLACE_SEARCH_TOTAL_TIMEOUT_SECONDS` | `18` | Limite total da busca, incluindo conexão, leitura, novas tentativas e pausas |
 | `PLACE_SEARCH_CACHE_TTL_SECONDS` | `600` | Tempo de cache das buscas por categoria |
 | `PLACE_SEARCH_MAX_RESULTS` | `5` | Máximo de locais devolvidos por busca |
 
 ## Busca de estabelecimentos na Estrada Nova
+
+A busca faz no máximo três tentativas sequenciais, alternando o servidor principal
+e o de reserva, com pausas de 0,5 e 1 segundo. Todas as tentativas compartilham o
+limite total de 18 segundos; cada uma tem no máximo um terço desse tempo. Respostas
+em cache continuam imediatas. Erros temporários de rede ou sobrecarga permitem nova
+tentativa; erros de consulta, como HTTP 400, encerram a busca. `Retry-After` e um
+intervalo mínimo de 30 segundos para HTTP 406/429 impedem repetir uma chamada ao
+mesmo servidor durante essa busca. Se o intervalo não cabe no limite, usa-se o
+outro servidor ou encerra-se a busca. Os logs registram servidor, tentativa,
+tipo de erro e código HTTP. Uma busca que esgota as tentativas conta como erro nas
+métricas, mantendo a mensagem de indisponibilidade no chat.
 
 Perguntas como “bons cafés na Estrada Nova”, “onde há farmácia?” ou “quais
 mercados existem no bairro?” consultam o OpenStreetMap em tempo real. A posição

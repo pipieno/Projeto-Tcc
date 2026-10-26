@@ -9,9 +9,9 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-from backend.app import create_app, utc_now
+from backend.app import MODEL_NAME, REQUEST_COUNT, create_app, utc_now
 from backend.database import ChatSession, Database, Message
-from backend.places import Place
+from backend.places import Place, PlaceSearchUnavailable
 
 
 class FakeChain:
@@ -296,6 +296,32 @@ async def test_local_business_search_uses_fixed_neighborhood_area(api):
     assert "Rua José Picolli, 100" in content
     assert "https://www.google.com/maps/search/" in content
     assert place_finder.calls == ["cafe"]
+    assert not chain.calls
+
+
+async def test_map_outage_keeps_chat_response_and_counts_as_error(api, monkeypatch):
+    client, _database, chain, place_finder = api
+    created = await create_session(client)
+
+    def unavailable(_category):
+        raise PlaceSearchUnavailable("OpenStreetMap indisponível")
+
+    monkeypatch.setattr(place_finder, "search", unavailable)
+    error_count = REQUEST_COUNT.labels(model=MODEL_NAME, status="error")._value.get()
+    ok_count = REQUEST_COUNT.labels(model=MODEL_NAME, status="ok")._value.get()
+    response = await client.post(
+        "/chat",
+        headers=authorization(created["session_token"]),
+        json={"session_id": created["session_id"], "message": "Onde fica a farmácia?"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["response"] == (
+        "Não consegui consultar o mapa da Estrada Nova agora. "
+        "Tente novamente em alguns instantes."
+    )
+    assert REQUEST_COUNT.labels(model=MODEL_NAME, status="error")._value.get() == error_count + 1
+    assert REQUEST_COUNT.labels(model=MODEL_NAME, status="ok")._value.get() == ok_count
     assert not chain.calls
 
 
