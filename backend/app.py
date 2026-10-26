@@ -522,6 +522,10 @@ def create_app(
                         response_source = "openstreetmap"
                         try:
                             places = place_finder.search(category)
+                            snapshot_updated_at = getattr(places, "snapshot_updated_at", None)
+                            if snapshot_updated_at is not None:
+                                response_source = "openstreetmap_snapshot"
+                                span.set_attribute("snapshot_updated_at", snapshot_updated_at.isoformat())
                             content = format_place_results(category, places)
                         except PlaceSearchUnavailable as exc:
                             span.record_exception(exc)

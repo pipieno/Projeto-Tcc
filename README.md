@@ -205,6 +205,32 @@ outro servidor ou encerra-se a busca. Os logs registram servidor, tentativa,
 tipo de erro e código HTTP. Uma busca que esgota as tentativas conta como erro nas
 métricas, mantendo a mensagem de indisponibilidade no chat.
 
+Se todos os servidores falharem, a aplicação tenta a cópia local em
+`backend/data/estrada_nova_places.json`. A resposta informa a data de consulta
+dos dados e a indisponibilidade da busca online. Após usar essa reserva, novas
+categorias usam a cópia por 60 segundos antes de tentar a rede novamente; o
+cache por categoria continua válido por 10 minutos. Cópias com mais de 30 dias,
+centro diferente ou raio insuficiente são recusadas.
+
+A cópia inicial contém dados reais de nós e vias do OpenStreetMap, baixados em
+26/10/2026 para a área de referência do bairro, com atribuição e licença ODbL.
+Ela não contém avaliações: “melhor padaria” continua sendo uma busca por
+proximidade. Se uma categoria não estiver cadastrada, o assistente informa essa
+limitação e oferece um link para pesquisar no Google Maps.
+
+Para atualizar a cópia, execute no host, com as dependências do backend instaladas:
+
+```powershell
+python -m backend.refresh_places_snapshot
+docker compose up -d --build --no-deps agente
+```
+
+O comando faz um download pontual de pequenas áreas pela
+[API do OpenStreetMap](https://wiki.openstreetmap.org/wiki/API_v0.6), preserva a
+cópia anterior se o download falhar e substitui o arquivo somente ao concluir.
+Esse download não é executado pelo chat. Os dados são distribuídos sob
+[ODbL, com atribuição aos colaboradores do OpenStreetMap](https://www.openstreetmap.org/copyright).
+
 Perguntas como “bons cafés na Estrada Nova”, “onde há farmácia?” ou “quais
 mercados existem no bairro?” consultam o OpenStreetMap em tempo real. A posição
 do usuário não é solicitada nem enviada ao backend: todas as buscas usam o ponto

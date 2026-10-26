@@ -29,6 +29,16 @@ class FakePlaceFinder:
 
     def search(self, category):
         self.calls.append(category.key)
+        if category.key == "pharmacy":
+            return [
+                Place(
+                    name="Farmácia da Estrada",
+                    address="Rua José Picolli, 150",
+                    distance_meters=400,
+                    latitude=-26.4702,
+                    longitude=-49.1266,
+                )
+            ]
         if category.key == "hospital":
             return [
                 Place(
@@ -296,6 +306,24 @@ async def test_local_business_search_uses_fixed_neighborhood_area(api):
     assert "Rua José Picolli, 100" in content
     assert "https://www.google.com/maps/search/" in content
     assert place_finder.calls == ["cafe"]
+    assert not chain.calls
+
+
+async def test_food_then_send_pharmacies_uses_map_for_both_messages(api):
+    client, _database, chain, place_finder = api
+    created = await create_session(client)
+    headers = authorization(created["session_token"])
+    for message in ["onde posso comer na estrada nova?", "me manda as farmacias"]:
+        response = await client.post(
+            "/chat",
+            headers=headers,
+            json={"session_id": created["session_id"], "message": message},
+        )
+        assert response.status_code == 200
+
+    assert "Farmácia da Estrada" in response.json()["response"]
+    assert "https://www.google.com/maps/search/" in response.json()["response"]
+    assert place_finder.calls == ["food", "pharmacy"]
     assert not chain.calls
 
 

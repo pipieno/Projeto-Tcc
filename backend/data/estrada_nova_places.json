@@ -1,0 +1,242 @@
+{
+  "version": 1,
+  "source": "https://www.openstreetmap.org",
+  "license": "ODbL-1.0",
+  "attribution": "© OpenStreetMap contributors",
+  "license_url": "https://www.openstreetmap.org/copyright",
+  "retrieved_at": "2026-10-26T22:44:35.798438+00:00",
+  "center_lat": -26.4700649,
+  "center_lon": -49.1264936,
+  "radius_meters": 1800,
+  "elements": [
+    {
+      "type": "node",
+      "id": 3320590991,
+      "lat": -26.4804757,
+      "lon": -49.1272881,
+      "tags": {
+        "addr:housenumber": "2890",
+        "addr:street": "Rua Joaquim Francisco de Paula",
+        "amenity": "school",
+        "name": "Escola Municipal Francisco de Paula",
+        "operator": "municipal"
+      }
+    },
+    {
+      "type": "node",
+      "id": 3320640136,
+      "lat": -26.4709371,
+      "lon": -49.1297172,
+      "tags": {
+        "addr:housenumber": "51",
+        "addr:street": "Rua Leopoldo Blese",
+        "amenity": "kindergarten",
+        "name": "CMEI Estrada Nova"
+      }
+    },
+    {
+      "type": "node",
+      "id": 3320645995,
+      "lat": -26.4710812,
+      "lon": -49.1300444,
+      "tags": {
+        "addr:housenumber": "77",
+        "addr:street": "Rua Leopoldo Blese",
+        "amenity": "school",
+        "name": "Escola Municipal Marcos Emílio Verbinnen",
+        "operator": "municipal"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4701419291,
+      "lat": -26.4672501,
+      "lon": -49.1215158,
+      "tags": {
+        "amenity": "pharmacy",
+        "healthcare": "pharmacy",
+        "name": "Farmacruz"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4701419793,
+      "lat": -26.4682486,
+      "lon": -49.108938,
+      "tags": {
+        "addr:housenumber": "1721",
+        "addr:street": "Rua Erwino Menegotti",
+        "addr:suburb": "Rau",
+        "amenity": "pharmacy",
+        "healthcare": "pharmacy",
+        "name": "Farmácia Santa Clara"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4701419794,
+      "lat": -26.4631106,
+      "lon": -49.117093,
+      "tags": {
+        "amenity": "pharmacy",
+        "healthcare": "pharmacy",
+        "name": "Farmagnus"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4701446291,
+      "lat": -26.481212,
+      "lon": -49.1157916,
+      "tags": {
+        "amenity": "pharmacy",
+        "healthcare": "pharmacy",
+        "name": "Farmácias Desconto Fácil"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6577191809,
+      "lat": -26.4836689,
+      "lon": -49.1175782,
+      "tags": {
+        "amenity": "restaurant",
+        "name": "Delicia Restaurante"
+      }
+    },
+    {
+      "type": "node",
+      "id": 10019089592,
+      "lat": -26.4814968,
+      "lon": -49.1174599,
+      "tags": {
+        "addr:housenumber": "1977",
+        "addr:street": "Rua Joaquim Francisco de Paula",
+        "addr:suburb": "Chico de Paulo",
+        "amenity": "restaurant",
+        "name": "Tempero de Casa"
+      }
+    },
+    {
+      "type": "node",
+      "id": 11029918258,
+      "lat": -26.4660881,
+      "lon": -49.1119254,
+      "tags": {
+        "addr:housenumber": "185",
+        "addr:street": "Rua Waldemar Rau",
+        "amenity": "restaurant",
+        "name": "Restaurante Saboroso"
+      }
+    },
+    {
+      "type": "node",
+      "id": 11375359871,
+      "lat": -26.466655,
+      "lon": -49.1154597,
+      "tags": {
+        "addr:street": "Rua Affonso Nicoluzzi",
+        "amenity": "cafe",
+        "name": "Ultra Cofee"
+      }
+    },
+    {
+      "type": "node",
+      "id": 13645622301,
+      "lat": -26.470469,
+      "lon": -49.127503,
+      "tags": {
+        "addr:street": "Rua José Picolli",
+        "amenity": "restaurant",
+        "name": "Espaço Gula Bistrô"
+      }
+    },
+    {
+      "type": "way",
+      "id": 326309677,
+      "lat": -26.46731845,
+      "lon": -49.1089202,
+      "tags": {
+        "amenity": "fuel",
+        "brand": "Petrobras",
+        "operator": "Vibra Energia",
+        "shop": "convenience"
+      }
+    },
+    {
+      "type": "way",
+      "id": 367359928,
+      "lat": -26.465185650000002,
+      "lon": -49.11196895,
+      "tags": {
+        "amenity": "school",
+        "name": "Escola de Educação Básica Julius Karsten"
+      }
+    },
+    {
+      "type": "way",
+      "id": 428049879,
+      "lat": -26.4575108,
+      "lon": -49.13595935,
+      "tags": {
+        "addr:housenumber": "399",
+        "addr:street": "Rua Augusto Demarchi",
+        "addr:suburb": "Três Rios do Sul",
+        "amenity": "school",
+        "name": "Escola Estadual Erich Gruetzmacher"
+      }
+    },
+    {
+      "type": "way",
+      "id": 432564475,
+      "lat": -26.46737015,
+      "lon": -49.11252965,
+      "tags": {
+        "addr:housenumber": "410",
+        "addr:street": "Rua dos Imigrantes",
+        "amenity": "college",
+        "name": "Senac"
+      }
+    },
+    {
+      "type": "way",
+      "id": 458062004,
+      "lat": -26.4684283,
+      "lon": -49.12126205,
+      "tags": {
+        "addr:housenumber": "110",
+        "addr:street": "Rua Ingo Blunk",
+        "addr:suburb": "Estrada Nova",
+        "amenity": "clinic",
+        "healthcare": "clinic",
+        "name": "Posto de Saúde Mathilde Sebold Blunk"
+      }
+    },
+    {
+      "type": "way",
+      "id": 571281503,
+      "lat": -26.4605888,
+      "lon": -49.1223017,
+      "tags": {
+        "addr:housenumber": "444",
+        "addr:street": "Rua Cesare Valentini",
+        "addr:suburb": "Três Rios do Sul",
+        "amenity": "school",
+        "name": "Senai"
+      }
+    },
+    {
+      "type": "way",
+      "id": 921402178,
+      "lat": -26.47321305,
+      "lon": -49.111677400000005,
+      "tags": {
+        "addr:housenumber": "1399",
+        "addr:street": "Rua João Wiest Júnior",
+        "addr:suburb": "Água Verde",
+        "name": "Cooper Supermercado",
+        "shop": "supermarket"
+      }
+    }
+  ]
+}

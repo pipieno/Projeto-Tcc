@@ -13,7 +13,9 @@ import time
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -25,7 +27,14 @@ DEFAULT_RADIUS_METERS = 1_800
 DEFAULT_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 DEFAULT_OVERPASS_FALLBACK_URL = "https://overpass.private.coffee/api/interpreter"
 MAX_SEARCH_ATTEMPTS = 3
+DEFAULT_SNAPSHOT_PATH = Path(__file__).with_name("data") / "estrada_nova_places.json"
 logger = logging.getLogger("agente")
+LOCATION_REQUEST_PATTERN = re.compile(
+    r"^(?:(?:e|entao|agora|tambem|por|favor|me|nos|voce|pode|poderia|consegue|conseguiria) )*"
+    r"(?:manda|mande|mandar|envia|envie|enviar|mostra|mostre|mostrar|liste|lista|listar|"
+    r"passa|passe|passar|indica|indique|indicar|recomenda|recomende|recomendar|"
+    r"sugere|sugira|sugerir|busca|busque|buscar|traz|traga|trazer)\b"
+)
 
 
 def normalize_text(value: str) -> str:
@@ -176,6 +185,21 @@ CATEGORIES = (
 )
 
 
+def matches_category(tags: dict, category: PlaceCategory) -> bool:
+    """Apply the same category filters to a downloaded OSM extract."""
+    for expression in category.filters:
+        match = re.fullmatch(r'\["([^"]+)"(=|~)"([^"]+)"\]', expression)
+        if match is None:
+            continue
+        key, operator, expected = match.groups()
+        value = tags.get(key, "")
+        if operator == "=" and value == expected:
+            return True
+        if operator == "~" and re.search(expected, value):
+            return True
+    return False
+
+
 def detect_place_category(value: str) -> PlaceCategory | None:
     normalized = normalize_text(value)
     tokens = set(normalized.split())
@@ -216,7 +240,7 @@ def detect_place_category(value: str) -> PlaceCategory | None:
     }
     has_location_context = bool(tokens.intersection(search_terms)) or (
         "estrada nov" in normalized
-    )
+    ) or bool(LOCATION_REQUEST_PATTERN.match(normalized))
     follow_up_fillers = {
         "e",
         "sobre",
@@ -261,6 +285,17 @@ class Place:
 
 class PlaceSearchUnavailable(RuntimeError):
     pass
+
+
+class PlaceResults(list[Place]):
+    """Keep source metadata alongside results, including empty search results."""
+
+    def __init__(self, places=(), *, snapshot_updated_at: datetime | None = None):
+        super().__init__(places)
+        self.snapshot_updated_at = snapshot_updated_at
+
+    def copy(self) -> PlaceResults:
+        return PlaceResults(self, snapshot_updated_at=self.snapshot_updated_at)
 
 
 def _float_setting(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -330,7 +365,9 @@ class OverpassPlaceFinder:
             parsed_url = urllib.parse.urlsplit(endpoint)
             if parsed_url.scheme != "https" or not parsed_url.hostname:
                 raise RuntimeError("Os endpoints Overpass devem usar HTTPS")
-        self._cache: dict[str, tuple[float, list[Place]]] = {}
+        self.snapshot_path = DEFAULT_SNAPSHOT_PATH
+        self._online_retry_at = 0.0
+        self._cache: dict[str, tuple[float, PlaceResults]] = {}
         self._cache_lock = threading.Lock()
 
     def _query(self, category: PlaceCategory, timeout_seconds: int | None = None) -> str:
@@ -505,29 +542,95 @@ class OverpassPlaceFinder:
         places.sort(key=lambda place: (place.distance_meters, place.name.casefold()))
         return places[: self.max_results]
 
-    def search(self, category: PlaceCategory) -> list[Place]:
+    def _snapshot_results(self, category: PlaceCategory) -> PlaceResults | None:
+        try:
+            snapshot = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
+            updated_at = datetime.fromisoformat(snapshot["retrieved_at"])
+            now = datetime.now(timezone.utc)
+            if (
+                snapshot["version"] != 1
+                or updated_at.tzinfo is None
+                or not timedelta(0) <= now - updated_at <= timedelta(days=30)
+                or not math.isclose(snapshot["center_lat"], self.center_lat, abs_tol=1e-7)
+                or not math.isclose(snapshot["center_lon"], self.center_lon, abs_tol=1e-7)
+                or snapshot["radius_meters"] < self.radius_meters
+                or not isinstance(snapshot["elements"], list)
+            ):
+                raise ValueError("Cópia local expirada ou incompatível com a área configurada")
+            elements = [
+                item for item in snapshot["elements"]
+                if isinstance(item, dict)
+                and isinstance(item.get("tags"), dict)
+                and matches_category(item["tags"], category)
+            ]
+            result = PlaceResults(
+                self._parse_places({"elements": elements}),
+                snapshot_updated_at=updated_at,
+            )
+            logger.info(
+                "Busca no mapa atendida pela cópia local",
+                extra={
+                    "category": category.key,
+                    "snapshot_updated_at": updated_at.isoformat(),
+                    "results_count": len(result),
+                },
+            )
+            return result
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            logger.warning(
+                "Cópia local do mapa indisponível",
+                extra={"error_type": type(exc).__name__, "error_reason": str(exc)[:300]},
+            )
+            return None
+
+    def search(self, category: PlaceCategory) -> PlaceResults:
         now = time.monotonic()
         with self._cache_lock:
             cached = self._cache.get(category.key)
             if cached and now - cached[0] <= self.cache_ttl_seconds:
-                return list(cached[1])
+                return cached[1].copy()
+            use_snapshot = now < self._online_retry_at
 
-        places = self._parse_places(self._fetch(category))
+        places = self._snapshot_results(category) if use_snapshot else None
+        if places is None:
+            try:
+                places = PlaceResults(self._parse_places(self._fetch(category)))
+            except PlaceSearchUnavailable:
+                places = self._snapshot_results(category)
+                if places is None:
+                    raise
+                # A short cooldown avoids waiting for the same unavailable
+                # providers again when the user asks about another category.
+                with self._cache_lock:
+                    self._online_retry_at = time.monotonic() + 60
         with self._cache_lock:
             self._cache[category.key] = (time.monotonic(), places)
-        return list(places)
+        return places.copy()
 
 
 def format_place_results(category: PlaceCategory, places: list[Place]) -> str:
+    snapshot_updated_at = getattr(places, "snapshot_updated_at", None)
+    source_note = (
+        "\n\nDados da cópia local do OpenStreetMap, consultados em "
+        f"{snapshot_updated_at:%d/%m/%Y}. A consulta online está indisponível."
+        if snapshot_updated_at is not None else ""
+    )
     if not places:
+        search_url = "https://www.google.com/maps/search/?" + urllib.parse.urlencode({
+            "api": "1", "query": f"{category.plural} Estrada Nova Jaraguá do Sul SC",
+        })
         return (
-            f"Não encontrei {category.plural} dentro da área de referência da "
+            f"Não encontrei registros de {category.plural} dentro da área de referência da "
             "Estrada Nova. O cadastro de locais pode estar incompleto, então isso "
             "não significa necessariamente que não existam opções."
+            f"\n\nVocê também pode conferir no Google Maps:\n{search_url}"
+            + source_note
         )
 
     lines = [
-        f"Encontrei estes {category.plural} na área da Estrada Nova:",
+        f"Resultados para {category.plural} na área da Estrada Nova:",
         "",
     ]
     for index, place in enumerate(places, start=1):
@@ -551,4 +654,4 @@ def format_place_results(category: PlaceCategory, places: list[Place]) -> str:
             "Confirme o endereço e o horário antes de sair.",
         ]
     )
-    return "\n".join(lines)
+    return "\n".join(lines) + source_note

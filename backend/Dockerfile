@@ -6,6 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py database.py places.py system_prompt.txt ./
+COPY data ./data
 
 RUN mkdir -p logs
 

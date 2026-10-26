@@ -23,14 +23,16 @@ PAYLOAD = {
 
 
 @pytest.fixture
-def finder(monkeypatch):
+def finder(monkeypatch, tmp_path):
     monkeypatch.setenv("OVERPASS_URL", "https://primary.example/api/interpreter")
     monkeypatch.setenv("OVERPASS_FALLBACK_URL", "https://backup.example/api/interpreter")
     monkeypatch.setenv("PLACE_SEARCH_TIMEOUT_SECONDS", "15")
     monkeypatch.setenv("PLACE_SEARCH_TOTAL_TIMEOUT_SECONDS", "18")
     monkeypatch.setenv("PLACE_SEARCH_CACHE_TTL_SECONDS", "600")
     monkeypatch.setattr(places.logger, "propagate", True)
-    return OverpassPlaceFinder()
+    finder = OverpassPlaceFinder()
+    finder.snapshot_path = tmp_path / "snapshot.json"
+    return finder
 
 
 @pytest.fixture
