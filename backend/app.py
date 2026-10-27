@@ -10,6 +10,8 @@ import time
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -32,6 +34,7 @@ from sqlalchemy.orm import Session
 
 try:  # Supports both `uvicorn app:app` and `import backend.app`.
     from .database import ChatSession, Database, Message
+    from .weather import WeatherClient, WeatherUnavailable, detect_weather_request, format_weather
     from .places import (
         OverpassPlaceFinder,
         PlaceSearchUnavailable,
@@ -40,6 +43,7 @@ try:  # Supports both `uvicorn app:app` and `import backend.app`.
     )
 except ImportError:  # pragma: no cover - exercised by the Docker entrypoint
     from database import ChatSession, Database, Message
+    from weather import WeatherClient, WeatherUnavailable, detect_weather_request, format_weather
     from places import (
         OverpassPlaceFinder,
         PlaceSearchUnavailable,
@@ -418,10 +422,12 @@ def create_app(
     chain: Any | None = None,
     place_finder: Any | None = None,
     session_ttl_hours: float | None = None,
+    weather_client: Any | None = None,
 ) -> FastAPI:
     database = database or Database()
     chain = chain or build_chain()
     place_finder = place_finder or OverpassPlaceFinder()
+    weather_client = weather_client or WeatherClient()
     session_ttl = resolve_session_ttl(session_ttl_hours)
 
     @asynccontextmanager
@@ -438,6 +444,7 @@ def create_app(
     application.state.database = database
     application.state.chain = chain
     application.state.place_finder = place_finder
+    application.state.weather_client = weather_client
     application.mount("/metrics", make_asgi_app())
     application.add_middleware(
         CORSMiddleware,
@@ -445,6 +452,45 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    def answer_weather(weather_request) -> tuple[str, str]:
+        if weather_request.explanation is not None:
+            return weather_request.explanation, "weather_scope"
+        with tracer.start_as_current_span("consulta_previsao") as weather_span:
+            weather_span.set_attribute("provider", "open-meteo")
+            try:
+                report = weather_client.forecast()
+                content = format_weather(weather_request, report)
+                weather_span.set_attribute("cache_hit", report.cached)
+                weather_span.set_attribute("fetched_at", report.fetched_at.isoformat())
+                return content, "weather"
+            except WeatherUnavailable as exc:
+                weather_span.record_exception(exc)
+                return (
+                    "Não consegui consultar a previsão para a Estrada Nova agora. "
+                    "Tente novamente em alguns instantes.",
+                    "weather_error",
+                )
+
+    def answer_places(category) -> tuple[str, str]:
+        with tracer.start_as_current_span("consulta_locais") as places_span:
+            places_span.set_attribute("category", category.key)
+            try:
+                places = place_finder.search(category)
+                source = "openstreetmap"
+                snapshot_updated_at = getattr(places, "snapshot_updated_at", None)
+                if snapshot_updated_at is not None:
+                    source = "openstreetmap_snapshot"
+                    places_span.set_attribute("snapshot_updated_at", snapshot_updated_at.isoformat())
+                places_span.set_attribute("response_source", source)
+                return format_place_results(category, places), source
+            except PlaceSearchUnavailable as exc:
+                places_span.record_exception(exc)
+                return (
+                    "Não consegui consultar o mapa da Estrada Nova agora. "
+                    "Tente novamente em alguns instantes.",
+                    "openstreetmap_error",
+                )
 
     @application.post(
         "/sessions",
@@ -516,24 +562,31 @@ def create_app(
             try:
                 content = conversation_memory_response(req.message, history)
                 response_source = "conversation_memory"
+                sources = []
                 if content is None:
+                    weather_request = detect_weather_request(
+                        req.message,
+                        history=[message.content for message in history if isinstance(message, HumanMessage)],
+                    )
                     category = detect_place_category(req.message)
+                    jobs = []
                     if category is not None:
-                        response_source = "openstreetmap"
-                        try:
-                            places = place_finder.search(category)
-                            snapshot_updated_at = getattr(places, "snapshot_updated_at", None)
-                            if snapshot_updated_at is not None:
-                                response_source = "openstreetmap_snapshot"
-                                span.set_attribute("snapshot_updated_at", snapshot_updated_at.isoformat())
-                            content = format_place_results(category, places)
-                        except PlaceSearchUnavailable as exc:
-                            span.record_exception(exc)
-                            content = (
-                                "Não consegui consultar o mapa da Estrada Nova agora. "
-                                "Tente novamente em alguns instantes."
-                            )
-                            response_source = "openstreetmap_error"
+                        jobs.append((answer_places, category))
+                    if weather_request is not None:
+                        jobs.append((answer_weather, weather_request))
+                    if len(jobs) > 1:
+                        # Copy the current trace into each worker. The database
+                        # session stays in this handler's thread; tools only fetch data.
+                        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+                            futures = [executor.submit(copy_context().run, function, argument) for function, argument in jobs]
+                            results = [future.result() for future in futures]
+                    else:
+                        results = [function(argument) for function, argument in jobs]
+                    if results:
+                        content = "\n\n".join(text for text, _source in results)
+                        sources = [source for _text, source in results]
+                        response_source = "+".join(sources)
+                        span.set_attribute("tools_used", len(results))
                     else:
                         response_source = "model"
                         result = chain.invoke({"input": req.message, "history": history})
@@ -557,7 +610,7 @@ def create_app(
                 span.set_attribute("response_length", len(content))
                 span.set_attribute("duration_seconds", round(duration, 3))
                 span.set_attribute("response_source", response_source)
-                interaction_status = "error" if response_source == "openstreetmap_error" else "ok"
+                interaction_status = "error" if any(source.endswith("_error") for source in sources) else "ok"
                 REQUEST_COUNT.labels(model=MODEL_NAME, status=interaction_status).inc()
                 RESPONSE_DURATION.labels(model=MODEL_NAME).observe(duration)
 

@@ -33,7 +33,7 @@ LOCATION_REQUEST_PATTERN = re.compile(
     r"^(?:(?:e|entao|agora|tambem|por|favor|me|nos|voce|pode|poderia|consegue|conseguiria) )*"
     r"(?:manda|mande|mandar|envia|envie|enviar|mostra|mostre|mostrar|liste|lista|listar|"
     r"passa|passe|passar|indica|indique|indicar|recomenda|recomende|recomendar|"
-    r"sugere|sugira|sugerir|busca|busque|buscar|traz|traga|trazer)\b"
+    r"sugere|sugira|sugerir|busca|busque|buscar|traz|traga|trazer|de|da)\b"
 )
 
 
@@ -203,6 +203,11 @@ def matches_category(tags: dict, category: PlaceCategory) -> bool:
 def detect_place_category(value: str) -> PlaceCategory | None:
     normalized = normalize_text(value)
     tokens = set(normalized.split())
+    clauses = [
+        normalize_text(part) for part in re.split(
+            r"[,;.!?]|\b(?:e|tamb[eé]m|al[eé]m disso)\b", value.casefold(),
+        ) if part.strip()
+    ]
     search_terms = {
         "onde",
         "qual",
@@ -240,7 +245,7 @@ def detect_place_category(value: str) -> PlaceCategory | None:
     }
     has_location_context = bool(tokens.intersection(search_terms)) or (
         "estrada nov" in normalized
-    ) or bool(LOCATION_REQUEST_PATTERN.match(normalized))
+    ) or any(LOCATION_REQUEST_PATTERN.match(clause) for clause in clauses)
     follow_up_fillers = {
         "e",
         "sobre",
@@ -259,8 +264,11 @@ def detect_place_category(value: str) -> PlaceCategory | None:
     for terms, category in CATEGORIES:
         if not tokens.intersection(terms):
             continue
-        is_short_follow_up = len(tokens) <= 4 and (
-            tokens.difference(terms).issubset(follow_up_fillers)
+        is_short_follow_up = any(
+            clause_tokens.intersection(terms)
+            and len(clause_tokens) <= 4
+            and clause_tokens.difference(terms).issubset(follow_up_fillers)
+            for clause_tokens in (set(clause.split()) for clause in clauses)
         )
         if has_location_context or is_short_follow_up:
             return category

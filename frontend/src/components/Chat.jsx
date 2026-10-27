@@ -6,6 +6,7 @@ const SUGGESTIONS = [
   'Como faço para me associar?',
   'Qual o endereço da AMOBEM?',
   'Quais os próximos eventos?',
+  'Vai chover amanhã?',
 ]
 
 const SESSION_STORAGE_KEY = 'amoben.chat.session.v1'

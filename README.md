@@ -13,6 +13,7 @@ O projeto consiste em um assistente virtual da **AMOBEN** (Associação de Morad
 - **Rastreamento distribuído** — OpenTelemetry SDK → Jaeger via OTLP/gRPC
 - **Persistência de conversas** — sessões autenticadas e mensagens armazenadas em MySQL
 - **Busca no bairro** — estabelecimentos do OpenStreetMap próximos ao centro fixo da Estrada Nova
+- **Previsão do tempo** — temperatura, chuva e vento via Open-Meteo para a região do bairro
 
 ---
 
@@ -140,6 +141,7 @@ Projeto-Tcc/
 │   ├── app.py              # FastAPI + LangChain + observabilidade
 │   ├── database.py         # Persistência e autenticação das sessões no MySQL
 │   ├── places.py           # Busca de estabelecimentos no OpenStreetMap
+│   ├── weather.py          # Previsão do tempo e reconhecimento de pedidos meteorológicos
 │   ├── system_prompt.txt   # Prompt do agente AMOBEN
 │   ├── requirements.txt
 │   └── Dockerfile
@@ -191,6 +193,42 @@ Projeto-Tcc/
 | `PLACE_SEARCH_TOTAL_TIMEOUT_SECONDS` | `18` | Limite total da busca, incluindo conexão, leitura, novas tentativas e pausas |
 | `PLACE_SEARCH_CACHE_TTL_SECONDS` | `600` | Tempo de cache das buscas por categoria |
 | `PLACE_SEARCH_MAX_RESULTS` | `5` | Máximo de locais devolvidos por busca |
+| `WEATHER_TIMEOUT_SECONDS` | `8` | Limite total da consulta meteorológica, incluindo até duas tentativas |
+| `WEATHER_CACHE_TTL_SECONDS` | `600` | Validade do cache meteorológico em segundos; descartado ao mudar o dia local |
+
+## Previsão do tempo na Estrada Nova
+
+Perguntas como “vai chover amanhã?”, “qual a temperatura hoje?”, “como está o
+tempo?” e “qual a previsão da semana?” consultam a
+[API de previsão da Open-Meteo](https://open-meteo.com/en/docs). A ferramenta usa
+as mesmas coordenadas fixas configuradas por `NEIGHBORHOOD_CENTER_LAT` e
+`NEIGHBORHOOD_CENTER_LON`, com o fuso `America/Sao_Paulo`. São previsões para a
+região, sem precisão garantida para uma rua específica.
+
+Hoje, amanhã, depois de amanhã, os próximos sete dias e nomes de dias da semana
+são aceitos. Uma continuação como “e amanhã?” mantém o contexto meteorológico;
+depois de uma mudança de assunto, esse contexto é descartado. Datas fora da
+janela suportada e pedidos sobre outras cidades recebem uma explicação.
+
+A resposta inclui mínima e máxima, probabilidade máxima de chuva, volume de
+precipitação e vento máximo. Para hoje, também mostra condições atuais estimadas
+pelo modelo meteorológico. A fonte, o horário dos dados atuais e a data/hora da
+consulta aparecem no chat. Valores ausentes são exibidos como não informados.
+
+Os dados são armazenados em cache por dez minutos. Falhas temporárias permitem
+uma nova tentativa dentro do limite total de oito segundos. Se a API estiver
+indisponível, o chat informa o erro sem inventar uma previsão. Não há chave de
+API para a integração não comercial usada neste TCC. A consulta aparece no
+Jaeger como `consulta_previsao`, com provedor e uso de cache; logs usam
+`response_source=weather` ou `weather_error`, e falhas contam nas métricas.
+
+Uma mesma mensagem pode pedir estabelecimentos e previsão, por exemplo:
+“me dê um restaurante da Estrada Nova com a localização e diga se amanhã vai
+chover”. As consultas são independentes e executadas em paralelo; a resposta
+reúne os locais com links de mapa e a previsão. Se uma consulta falhar, o resultado
+da outra é preservado. No Jaeger, `consulta_locais` e `consulta_previsao` aparecem
+no mesmo trace; `response_source` reúne as fontes com `+`. Cada interação conta
+uma vez nas métricas e é marcada como erro se alguma das ferramentas falhar.
 
 ## Busca de estabelecimentos na Estrada Nova
 
